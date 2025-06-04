@@ -75,7 +75,7 @@ const std::string CLS_TAG       = "Tag";
 const std::string CLS_IBEACON   = "iBeacon";
 const std::string CLS_EDDYSTONE = "Eddystone";
 const std::string CLS_SENSOR    = "Sensor";
-const std::string CLS_MESHTASTIC= "Meshtastic";
+const std::string CLS_MESHTASTIC = "Meshtastic";
 const std::string CLS_HID       = "HID";
 const std::string CLS_OTHER_BLE = "OtherBLE";
 const std::string CLS_UNKNOWN   = "Unknown";
@@ -145,7 +145,7 @@ std::string classifyDevice(BLEAdvertisedDevice& device);
 std::string truncateString(const std::string& str, size_t width);
 void processActivityData();
 void updatePaxCountDisplay();
-void updateDetailDisplay(); // Renamed
+void updateDetailDisplay(); // Updates detailed information on the display
 
 void setup() {
     auto cfg = M5.config();
@@ -205,7 +205,7 @@ void loop() {
             }
 
             if (macs_sighted_this_scan_cycle.find(mac_key) == macs_sighted_this_scan_cycle.end()) {
-                activity.detection_timestamps.push_back(current_time_ms);
+                activity.detection_timestamps.push_back(millis());
                 macs_sighted_this_scan_cycle.insert(mac_key);
             }
         }
