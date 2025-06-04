@@ -190,13 +190,19 @@ void loop() {
                 std::string mac_str_for_init = bleAddrNonConst.toString();
                 MacActivityInfo new_activity(mac_key, mac_str_for_init);
                 new_activity.classification_label = classifyDevice(device);
-                
+
                 auto insert_result = mac_activity_db.emplace(mac_key, new_activity);
                 activity_ptr = &insert_result.first->second;
             } else {
                 activity_ptr = &it->second;
             }
             MacActivityInfo& activity = *activity_ptr;
+
+            // Reclassify device when new information is available
+            std::string new_label = classifyDevice(device);
+            if (new_label != activity.classification_label) {
+                activity.classification_label = new_label;
+            }
 
             if (macs_sighted_this_scan_cycle.find(mac_key) == macs_sighted_this_scan_cycle.end()) {
                 activity.detection_timestamps.push_back(current_time_ms);
