@@ -321,7 +321,7 @@ void loop() {
     if (touch_count > 0) {
         lgfx::v1::touch_point_t tp;
         // Consider the first touch point for simplicity
-        M5.Touch.getDetail(&tp, 0);
+        tp = M5.Touch.getDetail(0);
 
         if (tp.y >= TOUCH_BTN_Y_MIN && tp.y <= TOUCH_BTN_Y_MAX) {
             if (tp.x >= TOUCH_BTN_A_X_MIN && tp.x <= TOUCH_BTN_A_X_MAX) {
