@@ -37,6 +37,8 @@ std::vector<std::string> available_filters;
 int current_filter_index = 0;
 std::string current_active_filter_label = "ALL"; // Default
 bool filter_display_needs_update = true;    // To force initial display of filter
+bool touch_A_active_last_frame = false;
+bool touch_C_active_last_frame = false;
 
 // --- Display Configuration ---
 static constexpr int TOP_N_COMMON_TO_DISPLAY = 5;   // For the "most common" list
@@ -60,6 +62,16 @@ static constexpr int DETAIL_REGION_Y          = PAX_COUNT_REGION_H;
 static constexpr int DETAIL_REGION_H          = SCREEN_HEIGHT - DETAIL_REGION_Y;
 static constexpr int DETAIL_LIST_X_START      = 5;
 static constexpr int LIST_ITEM_START_OFFSET   = 2; // Indent for list items under titles
+
+// --- Touch Button Zone Definitions (for M5Stack Core2) ---
+constexpr int TOUCH_BTN_Y_MIN = 200; // Y-coordinate for bottom buttons
+constexpr int TOUCH_BTN_Y_MAX = 240; // Screen height
+constexpr int TOUCH_BTN_A_X_MIN = 0;   // Left button
+constexpr int TOUCH_BTN_A_X_MAX = 106;
+// constexpr int TOUCH_BTN_B_X_MIN = 107; // Middle button (unused)
+// constexpr int TOUCH_BTN_B_X_MAX = 212;
+constexpr int TOUCH_BTN_C_X_MIN = 213; // Right button
+constexpr int TOUCH_BTN_C_X_MAX = 319; // Screen width
 
 // Titles and Separator
 static const std::string TITLE_TOP_COMMON = "Most Common:";
@@ -298,32 +310,67 @@ void setup() {
 void loop() {
     M5.update(); // Read button states
 
-    bool filter_changed_by_button = false;
-    if (M5.BtnA.wasPressed()) { // Cycle to next filter
+    // --- New Touch Button Logic for M5Stack Core2 ---
+    bool btnA_wasPressed = false;
+    bool btnC_wasPressed = false;
+
+    int touch_count = M5.Touch.getCount();
+    bool current_touch_A_active = false;
+    bool current_touch_C_active = false;
+
+    if (touch_count > 0) {
+        lgfx::v1::touch_point_t tp;
+        // Consider the first touch point for simplicity
+        M5.Touch.getPoint(&tp, 0);
+
+        if (tp.y >= TOUCH_BTN_Y_MIN && tp.y <= TOUCH_BTN_Y_MAX) {
+            if (tp.x >= TOUCH_BTN_A_X_MIN && tp.x <= TOUCH_BTN_A_X_MAX) {
+                current_touch_A_active = true;
+            } else if (tp.x >= TOUCH_BTN_C_X_MIN && tp.x <= TOUCH_BTN_C_X_MAX) {
+                current_touch_C_active = true;
+            }
+        }
+    }
+
+    if (current_touch_A_active && !touch_A_active_last_frame) {
+        btnA_wasPressed = true;
+        Serial.println("DEBUG: Touch A (Left) wasPressed detected."); // New debug
+    }
+    if (current_touch_C_active && !touch_C_active_last_frame) {
+        btnC_wasPressed = true;
+        Serial.println("DEBUG: Touch C (Right) wasPressed detected."); // New debug
+    }
+
+    touch_A_active_last_frame = current_touch_A_active;
+    touch_C_active_last_frame = current_touch_C_active;
+
+    // --- Filter Update Logic (uses btnA_wasPressed, btnC_wasPressed) ---
+    bool filter_changed_by_touch = false;
+    if (btnA_wasPressed) { // Cycle to next filter
         current_filter_index++;
         if (current_filter_index >= available_filters.size()) {
             current_filter_index = 0;
         }
-        filter_changed_by_button = true;
+        filter_changed_by_touch = true;
     }
-    if (M5.BtnC.wasPressed()) { // Cycle to previous filter
-        if (!available_filters.empty()) { // Check before decrementing
+    if (btnC_wasPressed) { // Cycle to previous filter
+        if (!available_filters.empty()) {
            current_filter_index--;
            if (current_filter_index < 0) {
                current_filter_index = available_filters.size() - 1;
            }
         } else {
-           current_filter_index = 0; // Should not happen if setup is correct
+           current_filter_index = 0;
         }
-        filter_changed_by_button = true;
+        filter_changed_by_touch = true;
     }
 
-    if (filter_changed_by_button && !available_filters.empty()) {
+    if (filter_changed_by_touch && !available_filters.empty()) {
         current_active_filter_label = available_filters[current_filter_index];
         filter_display_needs_update = true;
-        last_top_common_summary = ""; // Force list summary regeneration
-        last_recent_summary = "";   // Force list summary regeneration
-        Serial.printf("Filter changed by button to: %s\n", current_active_filter_label.c_str());
+        last_top_common_summary = "";
+        last_recent_summary = "";
+        Serial.printf("Filter changed by touch to: %s\n", current_active_filter_label.c_str());
     }
 
     unsigned long current_time_ms = millis();
