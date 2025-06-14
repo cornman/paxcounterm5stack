@@ -116,25 +116,7 @@ const std::string CLS_SAMSUNG_DEV = "SamsungDev";
 const std::string CLS_GOOGLE_DEV  = "GoogleDev";
 const std::string CLS_MSFT_DEV    = "MSFTDev";
 
-const std::set<std::string> PAX_RELEVANT_CLASSIFICATIONS = {
-    CLS_PHONE, CLS_WATCH, CLS_AUDIO, CLS_COMPUTER, CLS_TABLET, CLS_OTHER_BLE, CLS_UNKNOWN
-};
-
-BLEScan* pBLEScan;
-
-// Converts a BLEAddress to a uint64_t for use as a map key.
-// ESP_BD_ADDR_LEN is typically 6 bytes.
-uint64_t bleAddressToUint64(const BLEAddress& bleAddr) {
-    const esp_bd_addr_t* nativeAddrPtr = bleAddr.getNative();
-    uint64_t val = 0;
-    if (nativeAddrPtr != nullptr) {
-        for (int i = 0; i < ESP_BD_ADDR_LEN; i++) {
-            val = (val << 8) | ((*nativeAddrPtr)[i]);
-        }
-    }
-    return val;
-}
-
+// --- Data Structures ---
 struct MacActivityInfo {
     std::string mac_address_str;
     uint64_t mac_address_key;
@@ -154,6 +136,25 @@ struct MacActivityInfo {
         return mac_address_key < other.mac_address_key;
     }
 };
+
+const std::set<std::string> PAX_RELEVANT_CLASSIFICATIONS = {
+    CLS_PHONE, CLS_WATCH, CLS_AUDIO, CLS_COMPUTER, CLS_TABLET, CLS_OTHER_BLE, CLS_UNKNOWN
+};
+
+BLEScan* pBLEScan;
+
+// Converts a BLEAddress to a uint64_t for use as a map key.
+// ESP_BD_ADDR_LEN is typically 6 bytes.
+uint64_t bleAddressToUint64(BLEAddress& bleAddr) {
+    const esp_bd_addr_t* nativeAddrPtr = bleAddr.getNative();
+    uint64_t val = 0;
+    if (nativeAddrPtr != nullptr) {
+        for (int i = 0; i < ESP_BD_ADDR_LEN; i++) {
+            val = (val << 8) | ((*nativeAddrPtr)[i]);
+        }
+    }
+    return val;
+}
 
 // Comparator for sorting by recency (newest first)
 struct CompareMacActivityByRecency {
@@ -199,7 +200,7 @@ void loadClassifications() {
         return;
     }
 
-    StaticJsonDocument<JSON_DOC_SIZE_ESTIMATE> doc; // Use Static for ESP32 if size is predictable
+    JsonDocument doc; // Use Static for ESP32 if size is predictable
     DeserializationError error = deserializeJson(doc, file);
     file.close();
 
@@ -226,7 +227,7 @@ void saveClassifications() {
         return;
     }
 
-    StaticJsonDocument<JSON_DOC_SIZE_ESTIMATE> doc; // Use Static
+    JsonDocument doc; // Use Static
 
     for (auto const& [mac_key, classification_label] : known_device_classifications) {
         // ArduinoJson object keys must be char* or String
@@ -329,14 +330,15 @@ void loop() {
     bool new_device_data_scanned = false;
     std::set<uint64_t> macs_sighted_this_scan_cycle;
 
-    BLEScanResults foundDevices = pBLEScan->start(SCAN_TIME_SECONDS, false);
+    BLEScanResults* pFoundDevices = pBLEScan->start(SCAN_TIME_SECONDS, false);
 
-    if (foundDevices.getCount() > 0) {
-        new_device_data_scanned = true;
-        for (int i = 0; i < foundDevices.getCount(); i++) {
-            BLEAdvertisedDevice device = foundDevices.getDevice(i);
-            BLEAddress bleAddrNonConst = device.getAddress(); // getAddress() returns by value, so it's a modifiable copy
-            uint64_t mac_key = bleAddressToUint64(bleAddrNonConst);
+    if (pFoundDevices != nullptr) {
+        if (pFoundDevices->getCount() > 0) {
+            new_device_data_scanned = true;
+            for (int i = 0; i < pFoundDevices->getCount(); i++) {
+                BLEAdvertisedDevice device = pFoundDevices->getDevice(i);
+                BLEAddress bleAddrNonConst = device.getAddress(); // getAddress() returns by value, so it's a modifiable copy
+                uint64_t mac_key = bleAddressToUint64(bleAddrNonConst);
 
 
             if (mac_key == 0) continue;
@@ -345,7 +347,7 @@ void loop() {
             auto it = mac_activity_db.find(mac_key);
 
             if (it == mac_activity_db.end()) { // Device first time seen in this session
-                std::string mac_str_for_init = bleAddrNonConst.toString();
+                std::string mac_str_for_init = bleAddrNonConst.toString().c_str();
                 MacActivityInfo new_activity(mac_key, mac_str_for_init);
 
                 std::string initial_classification = classifyDevice(device);
@@ -389,7 +391,11 @@ void loop() {
                 macs_sighted_this_scan_cycle.insert(mac_key);
             }
         }
-        pBLEScan->clearResults();
+        pBLEScan->clearResults(); // Clear results from the BLEScan object
+        }
+    } else {
+        Serial.println("Error: pBLEScan->start() returned nullptr, skipping scan processing.");
+        // new_device_data_scanned will remain false
     }
 
     static unsigned long last_data_processing_time_ms = 0;
@@ -413,7 +419,7 @@ void loop() {
 std::string classifyDevice(BLEAdvertisedDevice& device) {
     // ... (classifyDevice function remains the same)
     if (device.haveManufacturerData()) {
-        std::string mfgData = device.getManufacturerData();
+        std::string mfgData = device.getManufacturerData().c_str();
         if (mfgData.length() >= 2) {
             uint16_t companyId = ((uint8_t)mfgData[1] << 8) | (uint8_t)mfgData[0];
             if (companyId == COMPANY_ID_APPLE &&
@@ -429,7 +435,7 @@ std::string classifyDevice(BLEAdvertisedDevice& device) {
     }
 
     if (device.haveManufacturerData()) {
-        std::string mfgData = device.getManufacturerData();
+        std::string mfgData = device.getManufacturerData().c_str();
         if (mfgData.length() >= 2) { // Need at least 2 bytes for Company ID
             uint16_t companyId = ((uint8_t)mfgData[1] << 8) | (uint8_t)mfgData[0]; // Little Endian
             switch (companyId) {
@@ -464,7 +470,7 @@ std::string classifyDevice(BLEAdvertisedDevice& device) {
         }
     }
     if (device.haveName()) {
-        std::string name = device.getName(); 
+        std::string name = device.getName().c_str();
         std::string lower_name = name;
         std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), 
                        [](unsigned char c){ return std::tolower(c); });
