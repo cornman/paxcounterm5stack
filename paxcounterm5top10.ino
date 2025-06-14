@@ -12,10 +12,31 @@
 #include <cctype>
 #include <cstring>
 
+#include <SPIFFS.h>
+#include <ArduinoJson.h> // Using ArduinoJson v6 syntax
+
 // --- Configuration Constants ---
 static constexpr int SCAN_TIME_SECONDS = 5;
 static constexpr unsigned long WINDOW_DURATION_MS = 60 * 60 * 1000UL;
 static constexpr unsigned long DATA_PROCESS_INTERVAL_MS = 5000;
+
+#ifndef ESP_BD_ADDR_LEN
+#define ESP_BD_ADDR_LEN 6
+#endif
+
+// --- Persistence Settings ---
+const char* PERSISTENCE_FILE = "/pax_classifications.json";
+std::map<uint64_t, std::string> known_device_classifications;
+bool classifications_changed_since_last_save = false;
+unsigned long last_save_time_ms = 0;
+constexpr unsigned long SAVE_INTERVAL_MS = 15 * 60 * 1000; // Save every 15 minutes if changes occurred
+constexpr size_t JSON_DOC_SIZE_ESTIMATE = 2048; // Adjust based on expected number of devices
+
+// --- Filtering Globals ---
+std::vector<std::string> available_filters;
+int current_filter_index = 0;
+std::string current_active_filter_label = "ALL"; // Default
+bool filter_display_needs_update = true;    // To force initial display of filter
 
 // --- Display Configuration ---
 static constexpr int TOP_N_COMMON_TO_DISPLAY = 5;   // For the "most common" list
@@ -62,6 +83,18 @@ constexpr uint16_t APPEARANCE_GENERIC_TAG = 0x0500;
 constexpr uint16_t APPEARANCE_GENERIC_THERMOMETER = 0x0300;
 constexpr uint16_t APPEARANCE_GENERIC_HEART_RATE_SENSOR = 0x0340;
 constexpr uint16_t APPEARANCE_GENERIC_CYCLING_COMPUTER = 0x0483;
+constexpr uint16_t APPEARANCE_GENERIC_HID = 0x03C0; // Standard Generic HID
+
+// --- Bluetooth Company Identifiers (Assigned Numbers from Bluetooth SIG) ---
+constexpr uint16_t COMPANY_ID_APPLE      = 0x004C;
+constexpr uint16_t COMPANY_ID_MICROSOFT  = 0x0006;
+constexpr uint16_t COMPANY_ID_SAMSUNG    = 0x0075;
+constexpr uint16_t COMPANY_ID_GOOGLE     = 0x00E0;
+// Add more as identified
+
+// --- iBeacon Specific Constants ---
+constexpr uint8_t IBEACON_TYPE_PROXIMITY = 0x02; // Byte indicating iBeacon type
+constexpr uint8_t IBEACON_DATA_LENGTH  = 0x15; // Expected data length for iBeacon
 
 // --- Classification Labels ---
 // ... (Classification labels remain the same) ...
@@ -79,21 +112,24 @@ const std::string CLS_MESHTASTIC = "Meshtastic";
 const std::string CLS_HID       = "HID";
 const std::string CLS_OTHER_BLE = "OtherBLE";
 const std::string CLS_UNKNOWN   = "Unknown";
+const std::string CLS_SAMSUNG_DEV = "SamsungDev";
+const std::string CLS_GOOGLE_DEV  = "GoogleDev";
+const std::string CLS_MSFT_DEV    = "MSFTDev";
 
 const std::set<std::string> PAX_RELEVANT_CLASSIFICATIONS = {
     CLS_PHONE, CLS_WATCH, CLS_AUDIO, CLS_COMPUTER, CLS_TABLET, CLS_OTHER_BLE, CLS_UNKNOWN
 };
 
 BLEScan* pBLEScan;
-// static constexpr int ESP_BD_ADDR_LEN = 6; // Define if not available from headers
 
-uint64_t bleAddressToUint64(BLEAddress& bleAddr) {
-    esp_bd_addr_t* nativeAddrArrayPtr = bleAddr.getNative();
+// Converts a BLEAddress to a uint64_t for use as a map key.
+// ESP_BD_ADDR_LEN is typically 6 bytes.
+uint64_t bleAddressToUint64(const BLEAddress& bleAddr) {
+    const esp_bd_addr_t* nativeAddrPtr = bleAddr.getNative();
     uint64_t val = 0;
-    if (nativeAddrArrayPtr != nullptr) {
-        uint8_t* macBytes = *nativeAddrArrayPtr;
+    if (nativeAddrPtr != nullptr) {
         for (int i = 0; i < ESP_BD_ADDR_LEN; i++) {
-            val = (val << 8) | (macBytes[i]);
+            val = (val << 8) | ((*nativeAddrPtr)[i]);
         }
     }
     return val;
@@ -105,10 +141,11 @@ struct MacActivityInfo {
     std::deque<unsigned long> detection_timestamps;
     size_t count_in_window = 0;
     std::string classification_label = CLS_UNKNOWN;
+    int latest_rssi = 0;
 
     MacActivityInfo() = default;
     explicit MacActivityInfo(uint64_t key, const std::string& mac_str)
-        : mac_address_str(mac_str), mac_address_key(key) {}
+        : mac_address_str(mac_str), mac_address_key(key), count_in_window(0), classification_label(CLS_UNKNOWN), latest_rssi(0) {}
 
     bool operator<(const MacActivityInfo& other) const {
         if (count_in_window != other.count_in_window) {
@@ -137,8 +174,10 @@ std::vector<MacActivityInfo> sorted_recent_macs;   // For N most recent
 int current_active_pax_count = 0;
 
 static int last_displayed_pax_total = -1;
-static std::vector<MacActivityInfo> last_rendered_top_common_list;
-static std::vector<MacActivityInfo> last_rendered_recent_list;
+// static std::vector<MacActivityInfo> last_rendered_top_common_list; // Replaced by summary string
+// static std::vector<MacActivityInfo> last_rendered_recent_list;   // Replaced by summary string
+static std::string last_top_common_summary = "";
+static std::string last_recent_summary = "";
 
 // --- Function Prototypes ---
 std::string classifyDevice(BLEAdvertisedDevice& device);
@@ -146,6 +185,71 @@ std::string truncateString(const std::string& str, size_t width);
 void processActivityData();
 void updatePaxCountDisplay();
 void updateDetailDisplay(); // Updates detailed information on the display
+
+// --- Persistence Functions ---
+void loadClassifications() {
+    if (!SPIFFS.begin(true)) { // true = format SPIFFS if mount failed
+        Serial.println("SPIFFS Mount Failed for loading.");
+        return;
+    }
+    File file = SPIFFS.open(PERSISTENCE_FILE, FILE_READ);
+    if (!file || file.size() == 0) {
+        Serial.println("Classification file not found or empty.");
+        if (file) file.close();
+        return;
+    }
+
+    StaticJsonDocument<JSON_DOC_SIZE_ESTIMATE> doc; // Use Static for ESP32 if size is predictable
+    DeserializationError error = deserializeJson(doc, file);
+    file.close();
+
+    if (error) {
+        Serial.print("deserializeJson() failed: ");
+        Serial.println(error.c_str());
+        return;
+    }
+
+    JsonObject root = doc.as<JsonObject>();
+    for (JsonPair kv : root) {
+        uint64_t mac_key = 0;
+        // sscanf needs a C-style string (const char*)
+        if (sscanf(kv.key().c_str(), "%llu", &mac_key) == 1) {
+            known_device_classifications[mac_key] = kv.value().as<std::string>();
+        }
+    }
+    Serial.printf("Loaded %u known classifications.\n", known_device_classifications.size());
+}
+
+void saveClassifications() {
+    if (!SPIFFS.begin(true)) { // Ensure SPIFFS is mounted
+        Serial.println("SPIFFS Mount Failed for saving.");
+        return;
+    }
+
+    StaticJsonDocument<JSON_DOC_SIZE_ESTIMATE> doc; // Use Static
+
+    for (auto const& [mac_key, classification_label] : known_device_classifications) {
+        // ArduinoJson object keys must be char* or String
+        String mac_key_str = String(mac_key);
+        doc[mac_key_str] = classification_label;
+    }
+
+    File file = SPIFFS.open(PERSISTENCE_FILE, FILE_WRITE);
+    if (!file) {
+        Serial.println("Failed to open classification file for writing.");
+        return;
+    }
+
+    if (serializeJson(doc, file) == 0) {
+        Serial.println("Failed to write to classification file.");
+    } else {
+        Serial.printf("Saved %u classifications.\n", known_device_classifications.size());
+        classifications_changed_since_last_save = false;
+        last_save_time_ms = millis();
+    }
+    file.close();
+}
+
 
 void setup() {
     auto cfg = M5.config();
@@ -156,17 +260,71 @@ void setup() {
     M5.Lcd.fillScreen(TFT_BLACK);
     M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK);
 
+    // Populate available filters
+    available_filters.push_back("ALL");
+    for (const auto& classification : PAX_RELEVANT_CLASSIFICATIONS) {
+        if (classification != "ALL") { // Avoid duplicates
+           available_filters.push_back(classification);
+        }
+    }
+    if (!available_filters.empty()) {
+        current_active_filter_label = available_filters[current_filter_index];
+    } else { // Safety for empty available_filters
+        available_filters.push_back("ALL"); // Ensure "ALL" is always an option
+        current_active_filter_label = "ALL";
+    }
+
+    loadClassifications(); // Load known device classifications
+
     updatePaxCountDisplay();
     updateDetailDisplay();  // Call the renamed display function
 
     BLEDevice::init("");
     pBLEScan = BLEDevice::getScan();
+    if (pBLEScan == nullptr) {
+        Serial.println("Error: Failed to get BLEScan object!");
+        M5.Lcd.fillScreen(TFT_RED);
+        M5.Lcd.setCursor(10, 10);
+        M5.Lcd.setTextSize(2);
+        M5.Lcd.print("BLE Init FAILED");
+        while (true) { delay(1000); } // Halt
+    }
     pBLEScan->setActiveScan(true);
     pBLEScan->setInterval(100);
     pBLEScan->setWindow(99);
 }
 
 void loop() {
+    M5.update(); // Read button states
+
+    bool filter_changed_by_button = false;
+    if (M5.BtnA.wasPressed()) { // Cycle to next filter
+        current_filter_index++;
+        if (current_filter_index >= available_filters.size()) {
+            current_filter_index = 0;
+        }
+        filter_changed_by_button = true;
+    }
+    if (M5.BtnC.wasPressed()) { // Cycle to previous filter
+        if (!available_filters.empty()) { // Check before decrementing
+           current_filter_index--;
+           if (current_filter_index < 0) {
+               current_filter_index = available_filters.size() - 1;
+           }
+        } else {
+           current_filter_index = 0; // Should not happen if setup is correct
+        }
+        filter_changed_by_button = true;
+    }
+
+    if (filter_changed_by_button && !available_filters.empty()) {
+        current_active_filter_label = available_filters[current_filter_index];
+        filter_display_needs_update = true;
+        last_top_common_summary = ""; // Force list summary regeneration
+        last_recent_summary = "";   // Force list summary regeneration
+        Serial.printf("Filter changed by button to: %s\n", current_active_filter_label.c_str());
+    }
+
     unsigned long current_time_ms = millis();
     bool new_device_data_scanned = false;
     std::set<uint64_t> macs_sighted_this_scan_cycle;
@@ -186,26 +344,48 @@ void loop() {
             MacActivityInfo* activity_ptr;
             auto it = mac_activity_db.find(mac_key);
 
-            if (it == mac_activity_db.end()) {
+            if (it == mac_activity_db.end()) { // Device first time seen in this session
                 std::string mac_str_for_init = bleAddrNonConst.toString();
                 MacActivityInfo new_activity(mac_key, mac_str_for_init);
-                new_activity.classification_label = classifyDevice(device);
+
+                std::string initial_classification = classifyDevice(device);
+                // If classification is vague, try to use a known one from persistence
+                if (initial_classification == CLS_UNKNOWN || initial_classification == CLS_OTHER_BLE) {
+                    auto known_it = known_device_classifications.find(mac_key);
+                    if (known_it != known_device_classifications.end()) {
+                        initial_classification = known_it->second;
+                    }
+                }
+                new_activity.classification_label = initial_classification;
 
                 auto insert_result = mac_activity_db.emplace(mac_key, new_activity);
                 activity_ptr = &insert_result.first->second;
-            } else {
+            } else { // Device already in DB for this session
                 activity_ptr = &it->second;
+                // Try to re-classify if new info is better
+                std::string new_label_from_scan = classifyDevice(device);
+                if (new_label_from_scan != CLS_UNKNOWN && new_label_from_scan != CLS_OTHER_BLE) { // Only update if new scan gives specific info
+                    if (activity_ptr->classification_label != new_label_from_scan) {
+                         activity_ptr->classification_label = new_label_from_scan;
+                    }
+                }
             }
-            MacActivityInfo& activity = *activity_ptr;
+            // MacActivityInfo& activity = *activity_ptr; // activity_ptr is already set by this point
+            activity_ptr->latest_rssi = device.getRSSI(); // Update with the latest RSSI reading
 
-            // Reclassify device when new information is available
-            std::string new_label = classifyDevice(device);
-            if (new_label != activity.classification_label) {
-                activity.classification_label = new_label;
+            // Persist new/updated classification if it's meaningful
+            if (activity_ptr->classification_label != CLS_UNKNOWN && activity_ptr->classification_label != CLS_OTHER_BLE) {
+                auto known_it = known_device_classifications.find(mac_key);
+                if (known_it == known_device_classifications.end() || known_it->second != activity_ptr->classification_label) {
+                    known_device_classifications[mac_key] = activity_ptr->classification_label;
+                    classifications_changed_since_last_save = true;
+                    // Serial.printf("Staged classification for %s: %s\n", activity_ptr->mac_address_str.c_str(), activity_ptr->classification_label.c_str()); // Optional: for debugging
+                }
             }
 
+            // Record timestamp for this sighting in this scan cycle
             if (macs_sighted_this_scan_cycle.find(mac_key) == macs_sighted_this_scan_cycle.end()) {
-                activity.detection_timestamps.push_back(millis());
+                activity_ptr->detection_timestamps.push_back(millis()); // Use activity_ptr here
                 macs_sighted_this_scan_cycle.insert(mac_key);
             }
         }
@@ -221,6 +401,12 @@ void loop() {
     updatePaxCountDisplay();
     updateDetailDisplay(); // Call the renamed display function
 
+    // Periodic saving of classifications
+    unsigned long current_time_ms_for_save = millis();
+    if (classifications_changed_since_last_save && (current_time_ms_for_save - last_save_time_ms > SAVE_INTERVAL_MS)) {
+        saveClassifications();
+    }
+
     delay(200);
 }
 
@@ -230,7 +416,10 @@ std::string classifyDevice(BLEAdvertisedDevice& device) {
         std::string mfgData = device.getManufacturerData();
         if (mfgData.length() >= 2) {
             uint16_t companyId = ((uint8_t)mfgData[1] << 8) | (uint8_t)mfgData[0];
-            if (companyId == 0x004C && mfgData.length() >= 4 && (uint8_t)mfgData[2] == 0x02 && (uint8_t)mfgData[3] == 0x15) {
+            if (companyId == COMPANY_ID_APPLE &&
+                mfgData.length() >= 4 && // Basic check for iBeacon structure
+                (uint8_t)mfgData[2] == IBEACON_TYPE_PROXIMITY &&
+                (uint8_t)mfgData[3] == IBEACON_DATA_LENGTH) {
                 return CLS_IBEACON;
             }
         }
@@ -238,6 +427,24 @@ std::string classifyDevice(BLEAdvertisedDevice& device) {
     if (device.haveServiceUUID() && device.isAdvertisingService(BLEUUID((uint16_t)0xFEAA))) {
         return CLS_EDDYSTONE;
     }
+
+    if (device.haveManufacturerData()) {
+        std::string mfgData = device.getManufacturerData();
+        if (mfgData.length() >= 2) { // Need at least 2 bytes for Company ID
+            uint16_t companyId = ((uint8_t)mfgData[1] << 8) | (uint8_t)mfgData[0]; // Little Endian
+            switch (companyId) {
+                case COMPANY_ID_MICROSOFT:
+                    return CLS_MSFT_DEV;
+                // case COMPANY_ID_APPLE: // Apple - Already handled by iBeacon check more specifically.
+                case COMPANY_ID_SAMSUNG:
+                    return CLS_SAMSUNG_DEV;
+                case COMPANY_ID_GOOGLE:
+                    return CLS_GOOGLE_DEV;
+                // Add more company IDs here if desired
+            }
+        }
+    }
+
     if (device.haveAppearance()) {
         uint16_t appearance = device.getAppearance();
         switch (appearance) {
@@ -253,7 +460,7 @@ std::string classifyDevice(BLEAdvertisedDevice& device) {
             case APPEARANCE_GENERIC_THERMOMETER: 
             case APPEARANCE_GENERIC_HEART_RATE_SENSOR:
             case APPEARANCE_GENERIC_CYCLING_COMPUTER: return CLS_SENSOR;
-            case 0x02C0: return CLS_HID;
+            case APPEARANCE_GENERIC_HID: return CLS_HID;
         }
     }
     if (device.haveName()) {
@@ -273,6 +480,12 @@ std::string classifyDevice(BLEAdvertisedDevice& device) {
                 lower_name.find("galaxy buds") != std::string::npos || 
                 lower_name.find("headset") != std::string::npos || 
                 lower_name.find("earbuds") != std::string::npos) return CLS_AUDIO;
+            if (lower_name.find("galaxy watch") != std::string::npos) return CLS_WATCH; // More specific for Samsung watches
+            if (lower_name.find("pixel buds") != std::string::npos) return CLS_AUDIO;   // Google audio
+            if (lower_name.find("surface") != std::string::npos) { // Could be various MSFT devices
+                if (lower_name.find("headphones") != std::string::npos) return CLS_AUDIO;
+                return CLS_MSFT_DEV; // Generic MSFT if name contains "surface"
+            }
         }
     }
     if (device.haveName() || device.haveServiceUUID() || device.haveManufacturerData() || device.haveAppearance()) {
@@ -326,8 +539,10 @@ void processActivityData() {
     std::vector<MacActivityInfo> all_active_macs_temp;
     all_active_macs_temp.reserve(mac_activity_db.size());
     for (const auto& pair : mac_activity_db) {
-        if (pair.second.count_in_window > 0) { 
-            all_active_macs_temp.push_back(pair.second);
+        if (pair.second.count_in_window > 0) { // Only consider active devices
+            if (current_active_filter_label == "ALL" || pair.second.classification_label == current_active_filter_label) {
+                all_active_macs_temp.push_back(pair.second);
+            }
         }
     }
     
@@ -346,8 +561,10 @@ void processActivityData() {
     active_macs_for_recency_sort.reserve(mac_activity_db.size());
     for (const auto& pair : mac_activity_db) {
         // Include if active and has at least one timestamp (to get .back())
-        if (pair.second.count_in_window > 0 && !pair.second.detection_timestamps.empty()) {
-            active_macs_for_recency_sort.push_back(pair.second);
+        if (pair.second.count_in_window > 0 && !pair.second.detection_timestamps.empty()) { // Active and has timestamps
+             if (current_active_filter_label == "ALL" || pair.second.classification_label == current_active_filter_label) {
+                active_macs_for_recency_sort.push_back(pair.second);
+            }
         }
     }
     
@@ -372,57 +589,62 @@ void updatePaxCountDisplay() {
     }
 }
 
-void updateDetailDisplay() {
-    bool top_common_list_changed = false;
-    int num_to_render_top = sorted_top_common_macs.size();
-
-    // --- Change detection for Top Common List ---
-    if (num_to_render_top != last_rendered_top_common_list.size()) {
-        top_common_list_changed = true;
-    } else {
-        for (int i = 0; i < num_to_render_top; ++i) {
-            if (sorted_top_common_macs[i].mac_address_key != last_rendered_top_common_list[i].mac_address_key ||
-                sorted_top_common_macs[i].count_in_window != last_rendered_top_common_list[i].count_in_window ||
-                sorted_top_common_macs[i].classification_label != last_rendered_top_common_list[i].classification_label) {
-                top_common_list_changed = true;
-                break;
-            }
-        }
-    }
-
-    bool recent_list_changed = false;
-    int num_to_render_recent = sorted_recent_macs.size();
-
-    // --- Change detection for Recent List ---
-    if (num_to_render_recent != last_rendered_recent_list.size()) {
-        recent_list_changed = true;
-    } else {
-        for (int i = 0; i < num_to_render_recent; ++i) {
-            bool item_different = false;
-            if (sorted_recent_macs[i].mac_address_key != last_rendered_recent_list[i].mac_address_key ||
-                sorted_recent_macs[i].classification_label != last_rendered_recent_list[i].classification_label) {
-                item_different = true;
+std::string generate_list_summary(const std::vector<MacActivityInfo>& mac_list, bool is_top_common_style) {
+    std::string summary;
+    summary.reserve(mac_list.size() * 50); // Adjusted reserve capacity
+    for (const auto& info : mac_list) {
+        summary += std::to_string(info.mac_address_key);
+        summary += ';';
+        summary += info.classification_label;
+        summary += ';';
+        if (is_top_common_style) {
+            summary += std::to_string(info.count_in_window);
+        } else { // Recent style
+            if (!info.detection_timestamps.empty()) {
+                summary += std::to_string(info.detection_timestamps.back());
             } else {
-                if (sorted_recent_macs[i].detection_timestamps.empty() != last_rendered_recent_list[i].detection_timestamps.empty()) {
-                    item_different = true;
-                } else if (!sorted_recent_macs[i].detection_timestamps.empty() && // Both non-empty
-                           !last_rendered_recent_list[i].detection_timestamps.empty() && // Check last_rendered too
-                           sorted_recent_macs[i].detection_timestamps.back() != last_rendered_recent_list[i].detection_timestamps.back()) {
-                    item_different = true;
-                }
-            }
-            if (item_different) {
-                recent_list_changed = true;
-                break;
+                summary += "N/A"; // Or some placeholder if empty
             }
         }
+        summary += ';'; // Separator before RSSI
+        summary += std::to_string(info.latest_rssi);
+        summary += '|'; // Item separator
+    }
+    return summary;
+}
+
+void updateDetailDisplay() {
+    // Generate compact string summaries of the lists for efficient change detection
+    std::string current_top_common_summary = generate_list_summary(sorted_top_common_macs, true);
+    std::string current_recent_summary = generate_list_summary(sorted_recent_macs, false);
+
+    bool data_lists_changed = false;
+    if (current_top_common_summary != last_top_common_summary) {
+        last_top_common_summary = current_top_common_summary;
+        data_lists_changed = true;
+    }
+    if (current_recent_summary != last_recent_summary) {
+        last_recent_summary = current_recent_summary;
+        data_lists_changed = true;
     }
 
-    if (top_common_list_changed || recent_list_changed) {
-        M5.Lcd.fillRect(0, DETAIL_REGION_Y, SCREEN_WIDTH, DETAIL_REGION_H, TFT_BLACK);
+    if (data_lists_changed || filter_display_needs_update) {
+        M5.Lcd.fillRect(0, DETAIL_REGION_Y, SCREEN_WIDTH, DETAIL_REGION_H, TFT_BLACK); // Clear entire detail area
         M5.Lcd.setTextSize(DETAIL_FONT_SIZE);
 
         int current_y = DETAIL_REGION_Y;
+
+        // Display Current Filter
+        M5.Lcd.setCursor(DETAIL_LIST_X_START, current_y);
+        M5.Lcd.setTextColor(TFT_YELLOW, TFT_BLACK); // Make filter stand out
+        M5.Lcd.printf("Filter: %s", current_active_filter_label.c_str());
+        current_y += DETAIL_FONT_HEIGHT + SPACE_AFTER_TITLE + 2; // Add some space
+        M5.Lcd.setTextColor(TFT_WHITE, TFT_BLACK); // Reset color for other text
+
+        filter_display_needs_update = false; // Reset flag AFTER using it
+
+        int num_to_render_top = sorted_top_common_macs.size();
+        int num_to_render_recent = sorted_recent_macs.size();
 
         // --- Render Top Common List ---
         M5.Lcd.setCursor(DETAIL_LIST_X_START, current_y);
@@ -435,14 +657,15 @@ void updateDetailDisplay() {
             if (item_y_pos + DETAIL_FONT_HEIGHT > DETAIL_REGION_Y + DETAIL_REGION_H) break;
 
             M5.Lcd.setCursor(DETAIL_LIST_X_START + LIST_ITEM_START_OFFSET, item_y_pos);
-            std::string truncated_label = truncateString(info.classification_label, CLASSIFICATION_DISPLAY_WIDTH);
+            std::string truncated_label = truncateString(info.classification_label, CLASSIFICATION_DISPLAY_WIDTH - 4);
             
-            // CORRECT printf for "Most Common" list: Rank, MAC, Class, (Count)
-            M5.Lcd.printf("%1d. %s %-*s (%u)",
+            M5.Lcd.printf("%1d. %s %-*s (%u,%ddBm)",
                           i + 1,
                           info.mac_address_str.c_str(),
-                          (int)CLASSIFICATION_DISPLAY_WIDTH, truncated_label.c_str(),
-                          (unsigned int)info.count_in_window);
+                          (int)(CLASSIFICATION_DISPLAY_WIDTH - 4),
+                          truncated_label.c_str(),
+                          (unsigned int)info.count_in_window,
+                          info.latest_rssi);
         }
         current_y += num_to_render_top * (DETAIL_FONT_HEIGHT + DETAIL_LIST_LINE_SPACING);
         current_y += SEPARATOR_LINE_Y_OFFSET;
@@ -466,21 +689,19 @@ void updateDetailDisplay() {
             if (item_y_pos + DETAIL_FONT_HEIGHT > DETAIL_REGION_Y + DETAIL_REGION_H) break;
 
             M5.Lcd.setCursor(DETAIL_LIST_X_START + LIST_ITEM_START_OFFSET, item_y_pos);
-            std::string truncated_label = truncateString(info.classification_label, CLASSIFICATION_DISPLAY_WIDTH);
+            std::string truncated_label_rec = truncateString(info.classification_label, CLASSIFICATION_DISPLAY_WIDTH - 4);
 
-            // CORRECT printf for "Recent Sightings" list: MAC, Class, (Time Ago s)
             unsigned long time_ago_s = 0;
             if (!info.detection_timestamps.empty()) {
                 time_ago_s = (millis() - info.detection_timestamps.back()) / 1000;
             }
-            M5.Lcd.printf("%s %-*s (%lus)",
+            M5.Lcd.printf("%s %-*s (%lus,%ddBm)",
                           info.mac_address_str.c_str(),
-                          (int)CLASSIFICATION_DISPLAY_WIDTH, // Using full width
-                          truncated_label.c_str(),
-                          time_ago_s);
+                          (int)(CLASSIFICATION_DISPLAY_WIDTH - 4),
+                          truncated_label_rec.c_str(),
+                          time_ago_s,
+                          info.latest_rssi);
         }
-
-        last_rendered_top_common_list.assign(sorted_top_common_macs.begin(), sorted_top_common_macs.begin() + num_to_render_top);
-        last_rendered_recent_list.assign(sorted_recent_macs.begin(), sorted_recent_macs.begin() + num_to_render_recent);
+        // No longer need to assign to last_rendered_... lists
     }
 }
