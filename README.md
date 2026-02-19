@@ -22,7 +22,7 @@ built-in LCD.
   memory.
 - **Serial CSV telemetry** — `CSV,millis,pax_total,pax_ble,pax_wifi,db_size`
   emitted every 30 s for easy data logging.
-- **WiFi channel hopping** — rotates through channels 1–13 to maximise
+- **WiFi channel hopping** — rotates through channels 1-13 to maximise
   probe request coverage.
 
 ## Hardware
@@ -34,81 +34,96 @@ built-in LCD.
 | Touch     | Built-in capacitive touch |
 | Storage   | SPIFFS (on-chip flash) |
 
-## Build
+## Arduino IDE Setup
 
-This is a [PlatformIO](https://platformio.org/) project.
+### 1. Install the ESP32 board package
 
-```bash
-# Build firmware
-pio run
+In **File > Preferences**, add this URL to *Additional Boards Manager URLs*:
 
-# Upload to connected M5Stack Core2
-pio run -t upload
-
-# Monitor serial output
-pio device monitor
 ```
+https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+```
+
+Then open **Tools > Board > Boards Manager**, search for **esp32** and
+install.
+
+### 2. Install required libraries
+
+Open **Sketch > Include Library > Manage Libraries** and install:
+
+- **M5Unified** (by M5Stack)
+- **ArduinoJson** (by Benoit Blanchon, v7+)
+
+### 3. Select your board
+
+- **Tools > Board** — choose **M5Stack-Core2**
+- **Tools > Port** — select the serial port for your device
+
+### 4. Open and upload
+
+Open `paxcounterm5stack.ino` in Arduino IDE.  All `.h` and `.cpp` files in
+the same folder will appear as tabs and compile automatically.
+
+Click **Upload** (or Ctrl+U).
 
 ### Disabling WiFi scanning
 
-WiFi probe-request scanning can be turned off at compile time:
+To disable WiFi probe-request capture, open `config.h` and change:
 
-```ini
-# In platformio.ini, change:
-build_flags = ... -DENABLE_WIFI_SCAN=0
+```cpp
+#define ENABLE_WIFI_SCAN 1
+```
+to:
+```cpp
+#define ENABLE_WIFI_SCAN 0
 ```
 
-## Running tests
+## Running the unit tests
 
-Pure-C++ unit tests (truncateString, macToString, PaxHistory, etc.) run
-natively on the host — no board required:
+Pure-C++ tests for `truncateString`, `macToString`, and `PaxHistory` run
+natively on any machine with a C++17 compiler — no board required:
 
 ```bash
-# PlatformIO
-pio test -e native
-
-# Or raw g++
-g++ -std=c++17 -I include test/test_native/test_helpers.cpp -o test_pax && ./test_pax
+g++ -std=c++17 -I . test/test_native/test_helpers.cpp -o test_pax && ./test_pax
 ```
 
 ## Project structure
 
+All source files live flat in the sketch directory so Arduino IDE picks them
+up automatically as tabs:
+
 ```
-include/
-  config.h              All tuneable constants
-  types.h               Shared types, classification labels, utility functions
-  device_classifier.h   BLE device classification (header)
-  ble_scanner.h         BLE scan management (header)
-  wifi_scanner.h        WiFi probe-request capture (header)
-  pax_store.h           Device database & SPIFFS persistence (header)
-  history.h             Circular-buffer PAX history for graphing
-  display_manager.h     Two-page touch display (header)
-src/
-  main.cpp              setup() / loop() orchestration
-  device_classifier.cpp Classification logic
-  ble_scanner.cpp       ESP32 BLE scanning
-  wifi_scanner.cpp      ESP32 WiFi promiscuous mode
-  pax_store.cpp         Device DB, window processing, persistence
-  display_manager.cpp   LCD rendering, touch handling
-test/
-  test_native/
-    test_helpers.cpp    Host-native unit tests
+paxcounterm5stack/
+  paxcounterm5stack.ino   Main sketch — setup() / loop()
+  config.h                All tuneable constants
+  types.h                 Shared types, classification labels, utilities
+  device_classifier.h/cpp BLE device classification
+  ble_scanner.h/cpp       ESP32 BLE scanning
+  wifi_scanner.h/cpp      WiFi promiscuous-mode probe capture
+  pax_store.h/cpp         Device database & SPIFFS persistence
+  history.h               Circular-buffer PAX history (header-only)
+  display_manager.h/cpp   Two-page touch LCD display
+  test/
+    test_native/
+      test_helpers.cpp    Host-native unit tests
 ```
 
 ## Touch controls
 
 | Button | Dashboard page | Detail page |
 |--------|---------------|-------------|
-| Left   | —             | Previous filter |
+| Left   | -             | Previous filter |
 | Middle | Switch page   | Switch page |
-| Right  | —             | Next filter |
+| Right  | -             | Next filter |
 
 ## Serial output
 
-At 115200 baud, the device emits CSV rows every 30 seconds:
+At 115200 baud the device emits CSV rows every 30 seconds:
 
 ```
 CSV,millis,pax_total,pax_ble,pax_wifi,db_size
 CSV,30000,42,28,19,156
 CSV,60000,45,30,20,162
 ```
+
+Pipe to a file for logging: `screen /dev/ttyUSB0 115200 | tee paxlog.csv`

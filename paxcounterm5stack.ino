@@ -5,14 +5,18 @@
 // requests, then displays the count, a 60-minute history graph, and
 // detailed device lists on the M5Stack Core2 screen.
 //
-// Architecture:
-//   main.cpp            – setup / loop orchestration
-//   ble_scanner          – ESP32 BLE scanning
-//   wifi_scanner         – ESP32 WiFi promiscuous-mode probe-request capture
-//   device_classifier    – Classifies BLE devices by appearance / name / mfg
-//   pax_store            – Central device database, persistence to SPIFFS
-//   history              – Circular-buffer PAX history for graphing
-//   display_manager      – Two-page touch UI (dashboard + detail list)
+// Arduino IDE setup:
+//   Board:    M5Stack Core2  (via ESP32 board package)
+//   Libraries: M5Unified, ArduinoJson (install from Library Manager)
+//
+// Architecture (all files live in this sketch folder):
+//   paxcounterm5stack.ino  – setup / loop orchestration (this file)
+//   ble_scanner            – ESP32 BLE scanning
+//   wifi_scanner           – ESP32 WiFi promiscuous-mode probe-request capture
+//   device_classifier      – Classifies BLE devices by appearance / name / mfg
+//   pax_store              – Central device database, persistence to SPIFFS
+//   history                – Circular-buffer PAX history for graphing
+//   display_manager        – Two-page touch UI (dashboard + detail list)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <M5Unified.h>
@@ -85,7 +89,7 @@ void loop() {
     drainWifiCaptures();
 
     // ── WiFi channel hop ─────────────────────────────────────────────────
-    if (now - g_lastChannelHopMs >= WIFI_CHANNEL_HOP_MS) {
+    if (now - g_lastChannelHopMs >= (unsigned long)WIFI_CHANNEL_HOP_MS) {
         hopWifiChannel();
         g_lastChannelHopMs = now;
     }

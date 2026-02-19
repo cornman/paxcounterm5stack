@@ -1,25 +1,25 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // PAX Counter M5Stack - Native Unit Tests
 // ─────────────────────────────────────────────────────────────────────────────
-// Run with:  pio test -e native
+// Compile from the sketch root:
+//   g++ -std=c++17 -I . test/test_native/test_helpers.cpp -o test_pax && ./test_pax
 //
 // These tests exercise pure-C++ code that has no Arduino / ESP-IDF dependency:
 //   - truncateString()
 //   - macToString()
 //   - PaxHistory
 
-// Minimal shim for snprintf (already in <cstdio> on the host)
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <cassert>
 
-// ── Inline the testable code so we don't need the full build ─────────────────
-// (PlatformIO native test env can't pull in ESP-IDF headers.)
+// ── Include testable headers from the sketch root ────────────────────────────
+// Compile with  -I .  pointing at the project root so these resolve.
 
-#include "../../include/types.h"
-#include "../../include/history.h"
+#include "types.h"
+#include "history.h"
 
 // ── Test framework (minimal, no external deps) ──────────────────────────────
 static int g_tests  = 0;
