@@ -1,13 +1,16 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// PAX Counter M5Stack - BLE Device Classifier
+// BLE Device Classifier
 // ─────────────────────────────────────────────────────────────────────────────
-// Classifies a BLE advertisement into one of the labels defined in types.h,
-// using (in priority order): iBeacon structure, Eddystone UUID, manufacturer
-// company ID, BLE appearance code, and device name keyword matching.
+// Classifies a BLE advertisement into a Classification enum value (see
+// classification.h), using (in priority order): iBeacon structure, Eddystone
+// UUID, manufacturer company ID, BLE appearance code, and device-name keywords.
+//
+// Target-only (depends on the BLE stack). All advertisement data is copied into
+// small fixed buffers before inspection, so no dynamic data flows into the logic.
 
 #include <BLEAdvertisedDevice.h>
-#include <string>
+#include <cstdint>
 
-// Returns one of the CLS_* labels from types.h.
-std::string classifyDevice(BLEAdvertisedDevice& device);
+// Returns a Classification enum value (never CLS_COUNT).
+uint8_t classifyDevice(BLEAdvertisedDevice& device);

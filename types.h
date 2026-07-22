@@ -1,94 +1,96 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// PAX Counter M5Stack - Shared Types & Utilities
+// Shared small types + bounded string helpers
 // ─────────────────────────────────────────────────────────────────────────────
-// Pure C++ – no Arduino or ESP-IDF dependencies – so these are testable
-// natively on the host.
+// Pure C++ (no Arduino / ESP-IDF), so these are unit-tested natively. All string
+// helpers write into a caller-owned fixed buffer and never allocate (Rule 3);
+// every loop has a static bound (Rule 2); parameters are validated (Rule 7).
 
-#include <string>
-#include <deque>
-#include <set>
+#include <cstdint>
+#include <cstddef>
+#include "c_assert.h"
 
-// ── Scan source tag ──────────────────────────────────────────────────────────
-enum class ScanSource : uint8_t { BLE, WIFI };
-
-// ── Classification labels ────────────────────────────────────────────────────
-// Short strings that fit the 320-px display.  Kept as inline constants so
-// every translation unit that includes this header sees the same objects.
-inline const std::string CLS_PHONE       = "Phone";
-inline const std::string CLS_WATCH       = "Watch";
-inline const std::string CLS_AUDIO       = "Audio";
-inline const std::string CLS_COMPUTER    = "PC/Lap";
-inline const std::string CLS_TABLET      = "Tablet";
-inline const std::string CLS_TAG         = "Tag";
-inline const std::string CLS_IBEACON     = "iBeacon";
-inline const std::string CLS_EDDYSTONE   = "Eddystone";
-inline const std::string CLS_SENSOR      = "Sensor";
-inline const std::string CLS_MESHTASTIC  = "Meshtastic";
-inline const std::string CLS_HID         = "HID";
-inline const std::string CLS_OTHER_BLE   = "OtherBLE";
-inline const std::string CLS_UNKNOWN     = "Unknown";
-inline const std::string CLS_SAMSUNG_DEV = "Samsung";
-inline const std::string CLS_GOOGLE_DEV  = "Google";
-inline const std::string CLS_MSFT_DEV    = "MSFT";
-inline const std::string CLS_WIFI_PROBE  = "WiFi";
-
-// ── PAX-relevant set ─────────────────────────────────────────────────────────
-// These classification labels count toward the PAX total.
-inline const std::set<std::string> PAX_RELEVANT = {
-    CLS_PHONE, CLS_WATCH, CLS_AUDIO, CLS_COMPUTER, CLS_TABLET,
-    CLS_OTHER_BLE, CLS_UNKNOWN, CLS_SAMSUNG_DEV, CLS_GOOGLE_DEV,
-    CLS_MSFT_DEV, CLS_WIFI_PROBE,
+// Which radio saw a device. Held only in RAM, never persisted to flash.
+enum ScanSource : uint8_t {
+    SRC_BLE  = 0,
+    SRC_WIFI = 1
 };
 
-// ── Per-device tracking record ───────────────────────────────────────────────
-struct MacActivityInfo {
-    std::string  mac_str;                    // Human-readable "aa:bb:cc:dd:ee:ff"
-    uint64_t     mac_key         = 0;
-    std::deque<unsigned long> timestamps;    // Detection times within the window
-    size_t       count_in_window = 0;
-    std::string  classification  = "Unknown";
-    int          rssi            = 0;
-    ScanSource   source          = ScanSource::BLE;
-
-    MacActivityInfo() = default;
-    MacActivityInfo(uint64_t key, const std::string& mac, ScanSource src)
-        : mac_str(mac), mac_key(key), source(src) {}
-
-    // Default sort: most detections first, then by MAC for stability.
-    bool operator<(const MacActivityInfo& o) const {
-        if (count_in_window != o.count_in_window)
-            return count_in_window > o.count_in_window;
-        return mac_key < o.mac_key;
+// Format a 48-bit MAC into "aa:bb:cc:dd:ee:ff". Writes at most `cap` bytes
+// including the NUL. Returns false (and writes "" if it can) when the buffer is
+// too small or NULL. Needs cap >= 18.
+inline bool macToStr(char* dst, size_t cap, uint64_t mac) {
+    if (!c_assert(dst != nullptr)) {
+        return false;
     }
-};
-
-// ── Recency comparator ──────────────────────────────────────────────────────
-struct ByRecency {
-    bool operator()(const MacActivityInfo& a, const MacActivityInfo& b) const {
-        unsigned long ta = a.timestamps.empty() ? 0 : a.timestamps.back();
-        unsigned long tb = b.timestamps.empty() ? 0 : b.timestamps.back();
-        if (ta != tb) return ta > tb;           // Newest first
-        return a.mac_key < b.mac_key;
+    if (!c_assert(cap >= 18)) {
+        if (cap > 0) {
+            dst[0] = '\0';
+        }
+        return false;
     }
-};
-
-// ── Pure utility functions ───────────────────────────────────────────────────
-
-// Truncate `str` to at most `width` characters, appending "." if truncated.
-inline std::string truncateString(const std::string& str, size_t width) {
-    if (str.length() <= width) return str;
-    if (width > 1) return str.substr(0, width - 1) + ".";
-    if (width == 1) return str.substr(0, 1);
-    return "";
+    static const char HEX[] = "0123456789abcdef";
+    size_t w = 0;
+    // Exactly 6 bytes, most-significant first — a fully static bound (Rule 2).
+    for (int byte = 5; byte >= 0; --byte) {
+        uint8_t v = (uint8_t)((mac >> (byte * 8)) & 0xFF);
+        dst[w++] = HEX[(v >> 4) & 0x0F];
+        dst[w++] = HEX[v & 0x0F];
+        if (byte > 0) {
+            dst[w++] = ':';
+        }
+    }
+    dst[w] = '\0';
+    return true;
 }
 
-// Format a MAC uint64_t (48-bit) into "aa:bb:cc:dd:ee:ff".
-inline std::string macToString(uint64_t mac) {
-    char buf[18];
-    snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
-             (unsigned)((mac >> 40) & 0xFF), (unsigned)((mac >> 32) & 0xFF),
-             (unsigned)((mac >> 24) & 0xFF), (unsigned)((mac >> 16) & 0xFF),
-             (unsigned)((mac >>  8) & 0xFF), (unsigned)(mac & 0xFF));
-    return buf;
+// Length of a C string, bounded by `cap` so a missing NUL cannot run away
+// (Rule 2). Returns cap if no NUL is found within the first cap bytes.
+inline size_t boundedLen(const char* s, size_t cap) {
+    if (!c_assert(s != nullptr)) {
+        return 0;
+    }
+    size_t n = 0;
+    while (n < cap && s[n] != '\0') {
+        ++n;
+    }
+    return n;
+}
+
+// Copy `src` into `dst` truncated to at most `width` visible characters, with a
+// trailing '.' when truncation occurred (mirrors the old truncateString). Always
+// NUL-terminates within `cap`. Returns false on invalid arguments.
+inline bool truncateStr(char* dst, size_t cap, const char* src, size_t width) {
+    if (!c_assert(dst != nullptr) || !c_assert(src != nullptr)) {
+        return false;
+    }
+    if (!c_assert(cap > 0)) {
+        return false;
+    }
+    size_t src_len = boundedLen(src, cap + width + 1);
+    size_t limit   = cap - 1;                 // room for the NUL
+    size_t out_w   = 0;
+
+    if (src_len <= width) {
+        // Fits: straight copy, still bounded by the destination.
+        while (out_w < limit && src[out_w] != '\0') {
+            dst[out_w] = src[out_w];
+            ++out_w;
+        }
+        dst[out_w] = '\0';
+        return true;
+    }
+    // Truncate to `width`, reserving the final slot for '.' when width > 1.
+    size_t keep = (width > 1) ? (width - 1) : width;   // width==0 -> keep 0
+    if (keep > limit) {
+        keep = limit;
+    }
+    for (size_t i = 0; i < keep; ++i) {
+        dst[out_w++] = src[i];
+    }
+    if (width > 1 && out_w < limit) {
+        dst[out_w++] = '.';
+    }
+    dst[out_w] = '\0';
+    return true;
 }

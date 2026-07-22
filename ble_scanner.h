@@ -1,12 +1,13 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// PAX Counter M5Stack - BLE Scanner
+// BLE Scanner
 // ─────────────────────────────────────────────────────────────────────────────
-// Wraps ESP32 BLE scanning.  Call initBle() once in setup(), then
-// runBleScan() each loop iteration.  Discovered devices are fed directly
-// into the PAX store.
+// Wraps ESP32 BLE scanning. Call initBle() once in setup(); call runBleScan()
+// each loop iteration. Discovered devices are classified and forwarded to the
+// PAX store. `now_ms` (the caller's millis()) is passed in so timekeeping has a
+// single source (Rule 6).
 
-#include <BLEScan.h>
+#include <cstdint>
 
-bool initBle();                     // Returns false on failure
-void runBleScan();                  // Blocking scan for BLE_SCAN_TIME_S seconds
+bool initBle();                     // returns false on failure
+void runBleScan(uint32_t now_ms);   // blocking scan for BLE_SCAN_TIME_S seconds

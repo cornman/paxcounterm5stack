@@ -1,35 +1,38 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// PAX Counter M5Stack - Device Database & Persistence
+// PAX Store — facade over the device table, known cache, and persistence
 // ─────────────────────────────────────────────────────────────────────────────
-// Central store for all detected devices.  Both BLE and WiFi scanners feed
-// into paxStoreIngest().  The main loop calls processActivityData() to prune
-// stale entries, recount PAX, and prepare sorted display lists.
+// The single ownership point the sketch and display talk to. It resolves weak
+// classifications against the persistent cache, forwards sightings to the fixed
+// device table, and drives periodic saves. No storage of its own beyond a small
+// save-timer (Rule 6).
 
-#include "types.h"
-#include <map>
-#include <vector>
-#include <string>
+#include <cstdint>
+#include <cstddef>
+#include "device_table.h"   // DeviceView + result accessors
 
-// ── Ingest a single sighting ─────────────────────────────────────────────────
-// Called by ble_scanner and wifi_scanner.  `addTimestamp` should be true the
-// first time a MAC is seen in a scan cycle to avoid duplicate timestamps.
-void paxStoreIngest(uint64_t macKey, const std::string& macStr,
-                    const std::string& label, int rssi,
-                    ScanSource source, bool addTimestamp);
+// Initialise all sub-modules and load persisted classifications. Call once.
+void psInit();
 
-// ── Window processing ────────────────────────────────────────────────────────
-// Prune old timestamps, recount PAX, rebuild sorted lists.
-void processActivityData(const std::string& filterLabel);
+// Record one sighting from a scanner. `cls` is the freshly-classified value
+// (possibly weak); the facade upgrades it from the known cache and records any
+// specific class back into the cache. Returns false if the device was dropped
+// (table full) or arguments were invalid.
+bool psIngest(uint64_t mac_key, const char* mac_str, uint8_t cls,
+              int rssi, uint8_t source, bool add_timestamp, uint32_t now_ms);
 
-// ── Persistence ──────────────────────────────────────────────────────────────
-void loadClassifications();
-void saveClassificationsIfNeeded();
+// Prune + recount + rebuild selection lists for the given UI filter (a
+// Classification value or FILTER_ALL).
+void psProcess(uint32_t now_ms, uint8_t filter);
 
-// ── Accessors ────────────────────────────────────────────────────────────────
-int  getPaxTotal();
-int  getPaxBle();
-int  getPaxWifi();
-const std::vector<MacActivityInfo>& getTopCommon();
-const std::vector<MacActivityInfo>& getRecentList();
-size_t getDbSize();
+// Persist the known cache if it changed and the save interval has elapsed.
+void psSaveIfDue(uint32_t now_ms);
+
+// ── Results (valid after psProcess) ──────────────────────────────────────────
+int      psPaxTotal();
+int      psPaxBle();
+int      psPaxWifi();
+size_t   psSize();
+uint32_t psDropped();
+const DeviceView* psTopCommon(size_t* count);
+const DeviceView* psRecent(size_t* count);

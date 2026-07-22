@@ -1,24 +1,24 @@
 #pragma once
 // ─────────────────────────────────────────────────────────────────────────────
-// PAX Counter M5Stack - WiFi Probe Request Scanner
+// WiFi Probe Request Scanner
 // ─────────────────────────────────────────────────────────────────────────────
-// Passively captures 802.11 probe requests in promiscuous mode to detect
-// nearby WiFi-enabled devices.  The promiscuous callback runs in the WiFi
-// task context; collected MACs are drained into the PAX store from the main
-// loop via drainWifiCaptures().
+// Passively captures 802.11 probe requests in promiscuous mode to detect nearby
+// WiFi devices. The promiscuous callback runs in the WiFi task; captured MACs are
+// drained into the PAX store from the main loop via drainWifiCaptures(now_ms).
 //
-// Compile guard: everything is a no-op when ENABLE_WIFI_SCAN == 0.
+// Rule 8 note: ENABLE_WIFI_SCAN is the project's ONE feature #ifdef (beyond
+// include guards). It selects whether the WiFi radio is used at all; when 0,
+// these become no-ops so the sketch builds and links without the WiFi path.
 
+#include <cstdint>
 #include "config.h"
 
 #if ENABLE_WIFI_SCAN
-
-void initWifiScanner();        // Call once in setup() AFTER initBle()
-void hopWifiChannel();         // Call periodically to rotate channels
-void drainWifiCaptures();      // Drain captured MACs into pax_store (main loop)
-
+bool initWifiScanner();                    // once in setup(); false on failure
+void hopWifiChannel();                     // rotate channels periodically
+void drainWifiCaptures(uint32_t now_ms);   // move captures into pax_store
 #else
-inline void initWifiScanner()  {}
-inline void hopWifiChannel()   {}
-inline void drainWifiCaptures() {}
+inline bool initWifiScanner()                 { return true; }
+inline void hopWifiChannel()                  {}
+inline void drainWifiCaptures(uint32_t)       {}
 #endif

@@ -19,11 +19,30 @@ built-in LCD.
     devices, filterable by classification.
 - **Persistent classification cache** — device classifications are saved to
   SPIFFS every 15 minutes and restored on boot, with LRU eviction to cap
-  memory.
+  memory. Stored as a compact fixed binary format (no JSON parser).
 - **Serial CSV telemetry** — `CSV,millis,pax_total,pax_ble,pax_wifi,db_size`
   emitted every 30 s for easy data logging.
 - **WiFi channel hopping** — rotates through channels 1-13 to maximise
   probe request coverage.
+- **Written to NASA/JPL's "Power of Ten" rules** — fixed static storage (no
+  heap in steady state), statically-bounded loops, small functions, assertions,
+  and checked returns. See [`POWER_OF_TEN.md`](POWER_OF_TEN.md).
+
+## Design: Power of Ten
+
+The firmware follows Gerard J. Holzmann's [Power of Ten](https://spinroot.com/gerard/pdf/P10.pdf)
+rules for safety-critical code. The core data model is **fixed-capacity static
+storage** — every runtime container is a static array sized in `config.h`, so
+the RAM footprint is provable at compile time and there is no heap allocation in
+steady state. When a table fills, new entries are dropped and counted
+(`Drop:` on the dashboard), never silently lost.
+
+The pure, hardware-independent modules (device table, classification, known
+cache, persistence, history) are unit-tested natively and compile warning-clean
+under `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror`.
+[`POWER_OF_TEN.md`](POWER_OF_TEN.md) is the full per-rule compliance report,
+including the few honestly-declared waivers (e.g. the ESP-IDF promiscuous
+callback that requires a function pointer).
 
 ## Hardware
 
@@ -52,7 +71,9 @@ install.
 Open **Sketch > Include Library > Manage Libraries** and install:
 
 - **M5Unified** (by M5Stack)
-- **ArduinoJson** (by Benoit Blanchon, v7+)
+
+(ArduinoJson is no longer required — persistence uses a built-in fixed binary
+format.)
 
 ### 3. Select your board
 
@@ -80,31 +101,46 @@ to:
 
 ## Running the unit tests
 
-Pure-C++ tests for `truncateString`, `macToString`, and `PaxHistory` run
-natively on any machine with a C++17 compiler — no board required:
+The pure, hardware-independent core is unit-tested natively — no board required.
+Run the helper (compiles at the strictest warning level and fails on any
+warning):
 
 ```bash
-g++ -std=c++17 -I . test/test_native/test_helpers.cpp -o test_pax && ./test_pax
+./run_tests.sh
+```
+
+You can also run the Power of Ten audit (function length + assertion density):
+
+```bash
+./p10_audit.sh
 ```
 
 ## Project structure
 
 All source files live flat in the sketch directory so Arduino IDE picks them
-up automatically as tabs:
+up automatically as tabs. Modules are split by concern (and by testability —
+the top group is pure C++ with no Arduino dependency):
 
 ```
 paxcounterm5stack/
-  paxcounterm5stack.ino   Main sketch — setup() / loop()
-  config.h                All tuneable constants
-  types.h                 Shared types, classification labels, utilities
-  device_classifier.h/cpp BLE device classification
+  paxcounterm5stack.ino   Main sketch — setup() / loop() orchestration
+  config.h                All fixed capacities + tunables
+  c_assert.h              Power of Ten Rule 5 assertion macro
+  types.h                 ScanSource + bounded string helpers  (pure)
+  classification.h/cpp    Classification enum + static label/PAX tables  (pure)
+  history.h               Fixed circular-buffer PAX history  (pure)
+  device_table.h/cpp      Fixed-capacity live device store  (pure)
+  known_cache.h/cpp       Fixed MAC->class LRU cache  (pure)
+  persistence.h/cpp       Fixed binary SPIFFS format (encode/decode pure)
+  device_classifier.h/cpp Classify a BLE advert into a Classification
   ble_scanner.h/cpp       ESP32 BLE scanning
   wifi_scanner.h/cpp      WiFi promiscuous-mode probe capture
-  pax_store.h/cpp         Device database & SPIFFS persistence
-  history.h               Circular-buffer PAX history (header-only)
+  pax_store.h/cpp         Facade over device_table + known_cache + persistence
   display_manager.h/cpp   Two-page touch LCD display
-  test/
-    test_native/
+  run_tests.sh            Build + run native tests (pedantic, -Werror)
+  p10_audit.sh            Rule 4 / Rule 5 mechanical audit
+  POWER_OF_TEN.md         Per-rule compliance report + declared waivers
+  test/test_native/
       test_helpers.cpp    Host-native unit tests
 ```
 
