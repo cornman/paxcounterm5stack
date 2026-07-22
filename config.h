@@ -7,6 +7,18 @@
 #include <cstdint>
 #include <cstddef>
 
+// ── Fixed-capacity limits (Power of Ten Rule 3: no dynamic allocation) ───────
+// Every runtime container in this project is a static array sized by one of
+// these constants. They set a hard, provable ceiling on RAM. When a table is
+// full the code drops new entries and logs it (no silent truncation) rather
+// than allocating. Raise these to trade RAM for capacity.
+static constexpr size_t DEV_MAX        = 256;  // max simultaneously-tracked devices
+static constexpr size_t DEV_TS_RING    = 16;   // detection timestamps kept per device
+static constexpr size_t MAC_STR_CAP    = 18;   // "aa:bb:cc:dd:ee:ff" + NUL
+static constexpr size_t KNOWN_MAX      = 512;  // persistent MAC->class cache (LRU)
+static constexpr size_t NAME_CAP       = 32;   // bounded copy of a BLE device name
+static constexpr size_t MFG_CAP        = 32;   // bounded copy of BLE manufacturer data
+
 // ── Scanning ─────────────────────────────────────────────────────────────────
 static constexpr int    BLE_SCAN_TIME_S          = 5;       // BLE scan window (seconds)
 static constexpr int    BLE_SCAN_INTERVAL        = 100;     // BLE scan interval (ms)
@@ -17,15 +29,19 @@ static constexpr int    BLE_SCAN_WINDOW          = 99;      // BLE scan window  
 #endif
 static constexpr int    WIFI_CHANNEL_HOP_MS      = 300;     // Hop WiFi channel every N ms
 static constexpr int    WIFI_NUM_CHANNELS        = 13;      // Channels 1–13
+static constexpr size_t BLE_MAX_RESULTS          = 256;     // per-scan result cap (Rule 2)
 
 // ── Activity window ──────────────────────────────────────────────────────────
 static constexpr unsigned long WINDOW_DURATION_MS        = 60UL * 60 * 1000; // 1 hour
 static constexpr unsigned long DATA_PROCESS_INTERVAL_MS  = 5000;
 
 // ── Persistence ──────────────────────────────────────────────────────────────
-static constexpr const char*   PERSISTENCE_FILE          = "/pax_cls.json";
-static constexpr unsigned long SAVE_INTERVAL_MS          = 15UL * 60 * 1000;
-static constexpr size_t        MAX_KNOWN_CLASSIFICATIONS = 512;  // LRU cap
+// Fixed binary record format (no JSON, no dynamic parser). Each record is a
+// uint64 MAC + uint8 class. See persistence.h for the on-flash layout.
+static constexpr const char*   PERSISTENCE_FILE = "/pax_cls.bin";
+static constexpr unsigned long SAVE_INTERVAL_MS = 15UL * 60 * 1000;
+static constexpr uint32_t      PERSIST_MAGIC    = 0x50415831;  // "PAX1"
+static constexpr uint8_t       PERSIST_VERSION  = 1;
 
 // ── Display layout (320 x 240, landscape) ────────────────────────────────────
 static constexpr int SCREEN_W = 320;

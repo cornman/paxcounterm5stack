@@ -19,11 +19,30 @@ built-in LCD.
     devices, filterable by classification.
 - **Persistent classification cache** — device classifications are saved to
   SPIFFS every 15 minutes and restored on boot, with LRU eviction to cap
-  memory.
+  memory. Stored as a compact fixed binary format (no JSON parser).
 - **Serial CSV telemetry** — `CSV,millis,pax_total,pax_ble,pax_wifi,db_size`
   emitted every 30 s for easy data logging.
-- **WiFi channel hopping** — rotates through channels 1–13 to maximise
+- **WiFi channel hopping** — rotates through channels 1-13 to maximise
   probe request coverage.
+- **Written to NASA/JPL's "Power of Ten" rules** — fixed static storage (no
+  heap in steady state), statically-bounded loops, small functions, assertions,
+  and checked returns. See [`POWER_OF_TEN.md`](POWER_OF_TEN.md).
+
+## Design: Power of Ten
+
+The firmware follows Gerard J. Holzmann's [Power of Ten](https://spinroot.com/gerard/pdf/P10.pdf)
+rules for safety-critical code. The core data model is **fixed-capacity static
+storage** — every runtime container is a static array sized in `config.h`, so
+the RAM footprint is provable at compile time and there is no heap allocation in
+steady state. When a table fills, new entries are dropped and counted
+(`Drop:` on the dashboard), never silently lost.
+
+The pure, hardware-independent modules (device table, classification, known
+cache, persistence, history) are unit-tested natively and compile warning-clean
+under `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror`.
+[`POWER_OF_TEN.md`](POWER_OF_TEN.md) is the full per-rule compliance report,
+including the few honestly-declared waivers (e.g. the ESP-IDF promiscuous
+callback that requires a function pointer).
 
 ## Hardware
 
@@ -34,81 +53,113 @@ built-in LCD.
 | Touch     | Built-in capacitive touch |
 | Storage   | SPIFFS (on-chip flash) |
 
-## Build
+## Arduino IDE Setup
 
-This is a [PlatformIO](https://platformio.org/) project.
+### 1. Install the ESP32 board package
 
-```bash
-# Build firmware
-pio run
+In **File > Preferences**, add this URL to *Additional Boards Manager URLs*:
 
-# Upload to connected M5Stack Core2
-pio run -t upload
-
-# Monitor serial output
-pio device monitor
 ```
+https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+```
+
+Then open **Tools > Board > Boards Manager**, search for **esp32** and
+install.
+
+### 2. Install required libraries
+
+Open **Sketch > Include Library > Manage Libraries** and install:
+
+- **M5Unified** (by M5Stack)
+
+(ArduinoJson is no longer required — persistence uses a built-in fixed binary
+format.)
+
+### 3. Select your board
+
+- **Tools > Board** — choose **M5Stack-Core2**
+- **Tools > Port** — select the serial port for your device
+
+### 4. Open and upload
+
+Open `paxcounterm5stack.ino` in Arduino IDE.  All `.h` and `.cpp` files in
+the same folder will appear as tabs and compile automatically.
+
+Click **Upload** (or Ctrl+U).
 
 ### Disabling WiFi scanning
 
-WiFi probe-request scanning can be turned off at compile time:
+To disable WiFi probe-request capture, open `config.h` and change:
 
-```ini
-# In platformio.ini, change:
-build_flags = ... -DENABLE_WIFI_SCAN=0
+```cpp
+#define ENABLE_WIFI_SCAN 1
+```
+to:
+```cpp
+#define ENABLE_WIFI_SCAN 0
 ```
 
-## Running tests
+## Running the unit tests
 
-Pure-C++ unit tests (truncateString, macToString, PaxHistory, etc.) run
-natively on the host — no board required:
+The pure, hardware-independent core is unit-tested natively — no board required.
+Run the helper (compiles at the strictest warning level and fails on any
+warning):
 
 ```bash
-# PlatformIO
-pio test -e native
+./run_tests.sh
+```
 
-# Or raw g++
-g++ -std=c++17 -I include test/test_native/test_helpers.cpp -o test_pax && ./test_pax
+You can also run the Power of Ten audit (function length + assertion density):
+
+```bash
+./p10_audit.sh
 ```
 
 ## Project structure
 
+All source files live flat in the sketch directory so Arduino IDE picks them
+up automatically as tabs. Modules are split by concern (and by testability —
+the top group is pure C++ with no Arduino dependency):
+
 ```
-include/
-  config.h              All tuneable constants
-  types.h               Shared types, classification labels, utility functions
-  device_classifier.h   BLE device classification (header)
-  ble_scanner.h         BLE scan management (header)
-  wifi_scanner.h        WiFi probe-request capture (header)
-  pax_store.h           Device database & SPIFFS persistence (header)
-  history.h             Circular-buffer PAX history for graphing
-  display_manager.h     Two-page touch display (header)
-src/
-  main.cpp              setup() / loop() orchestration
-  device_classifier.cpp Classification logic
-  ble_scanner.cpp       ESP32 BLE scanning
-  wifi_scanner.cpp      ESP32 WiFi promiscuous mode
-  pax_store.cpp         Device DB, window processing, persistence
-  display_manager.cpp   LCD rendering, touch handling
-test/
-  test_native/
-    test_helpers.cpp    Host-native unit tests
+paxcounterm5stack/
+  paxcounterm5stack.ino   Main sketch — setup() / loop() orchestration
+  config.h                All fixed capacities + tunables
+  c_assert.h              Power of Ten Rule 5 assertion macro
+  types.h                 ScanSource + bounded string helpers  (pure)
+  classification.h/cpp    Classification enum + static label/PAX tables  (pure)
+  history.h               Fixed circular-buffer PAX history  (pure)
+  device_table.h/cpp      Fixed-capacity live device store  (pure)
+  known_cache.h/cpp       Fixed MAC->class LRU cache  (pure)
+  persistence.h/cpp       Fixed binary SPIFFS format (encode/decode pure)
+  device_classifier.h/cpp Classify a BLE advert into a Classification
+  ble_scanner.h/cpp       ESP32 BLE scanning
+  wifi_scanner.h/cpp      WiFi promiscuous-mode probe capture
+  pax_store.h/cpp         Facade over device_table + known_cache + persistence
+  display_manager.h/cpp   Two-page touch LCD display
+  run_tests.sh            Build + run native tests (pedantic, -Werror)
+  p10_audit.sh            Rule 4 / Rule 5 mechanical audit
+  POWER_OF_TEN.md         Per-rule compliance report + declared waivers
+  test/test_native/
+      test_helpers.cpp    Host-native unit tests
 ```
 
 ## Touch controls
 
 | Button | Dashboard page | Detail page |
 |--------|---------------|-------------|
-| Left   | —             | Previous filter |
+| Left   | -             | Previous filter |
 | Middle | Switch page   | Switch page |
-| Right  | —             | Next filter |
+| Right  | -             | Next filter |
 
 ## Serial output
 
-At 115200 baud, the device emits CSV rows every 30 seconds:
+At 115200 baud the device emits CSV rows every 30 seconds:
 
 ```
 CSV,millis,pax_total,pax_ble,pax_wifi,db_size
 CSV,30000,42,28,19,156
 CSV,60000,45,30,20,162
 ```
+
+Pipe to a file for logging: `screen /dev/ttyUSB0 115200 | tee paxlog.csv`
